@@ -27,6 +27,8 @@ import {
   importGeminiCLIAccount,
   createZaiTTSAccount,
   createZaiImageAccount,
+  startCopilotDeviceFlow,
+  pollCopilotDeviceFlow,
 } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Button as StatefulButton } from '@/components/ui/stateful-button';
@@ -40,7 +42,7 @@ import {
   DrawerHeader,
   DrawerTitle,
 } from '@/components/ui/drawer';
-import { IconExternalLink, IconCopy, IconX } from '@tabler/icons-react';
+import { IconExternalLink, IconCopy, IconX, IconBrandGithub } from '@tabler/icons-react';
 import { Gemini, OpenAI, Qwen } from '@lobehub/icons';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
@@ -111,7 +113,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const [step, setStep] = useState<
     'platform' | 'kiro_provider' | 'method' | 'authorize'
   >('platform');
-  const [platform, setPlatform] = useState<'antigravity' | 'kiro' | 'qwen' | 'codex' | 'gemini' | 'zai-tts' | 'zai-image' | ''>('');
+  const [platform, setPlatform] = useState<'antigravity' | 'kiro' | 'qwen' | 'codex' | 'gemini' | 'zai-tts' | 'zai-image' | 'copilot' | ''>('');
   const [kiroProvider, setKiroProvider] = useState<'social' | 'aws_idc' | 'enterprise' | 'external_idp' | ''>('');
   const [loginMethod, setLoginMethod] = useState<'manual' | 'refresh_token' | ''>(''); // Antigravity 登录方式
   const [kiroLoginMethod, setKiroLoginMethod] = useState<'oauth' | 'refresh_token' | ''>('');
@@ -133,10 +135,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const [kiroExternalIdpTokenEndpoint, setKiroExternalIdpTokenEndpoint] = useState('');
   const [kiroExternalIdpIssuerUrl, setKiroExternalIdpIssuerUrl] = useState('');
   const [kiroExternalIdpScopes, setKiroExternalIdpScopes] = useState('');
-  const [kiroExternalIdpSsoClientId, setKiroExternalIdpSsoClientId] = useState('');
-  const [kiroExternalIdpSsoClientSecret, setKiroExternalIdpSsoClientSecret] = useState('');
-  const [kiroExternalIdpSsoRefreshToken, setKiroExternalIdpSsoRefreshToken] = useState('');
-  const [kiroExternalIdpSsoStartUrl, setKiroExternalIdpSsoStartUrl] = useState('');
+  const [kiroExternalIdpProfileArn, setKiroExternalIdpProfileArn] = useState('');
   const [kiroExternalIdpRegion, setKiroExternalIdpRegion] = useState('us-east-1');
   const [kiroExternalIdpJsonText, setKiroExternalIdpJsonText] = useState('');
   const [kiroExternalIdpJsonResults, setKiroExternalIdpJsonResults] = useState<EnterpriseJsonImportResult[]>([]);
@@ -175,6 +174,11 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const [zaiTtsVoiceId, setZaiTtsVoiceId] = useState('system_001');
   const [zaiImageAccountName, setZaiImageAccountName] = useState('');
   const [zaiImageToken, setZaiImageToken] = useState('');
+  const [copilotDeviceCode, setCopilotDeviceCode] = useState('');
+  const [copilotVerificationUri, setCopilotVerificationUri] = useState('');
+  const [copilotIsPolling, setCopilotIsPolling] = useState(false);
+  const [copilotIsStarting, setCopilotIsStarting] = useState(false);
+  const copilotPollTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [oauthUrl, setOauthUrl] = useState('');
   const [oauthState, setOauthState] = useState(''); // Kiro OAuth state
   const [callbackUrl, setCallbackUrl] = useState('');
@@ -220,6 +224,10 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       }
       if (pollTimerRef.current) {
         clearInterval(pollTimerRef.current);
+      }
+      if (copilotPollTimerRef.current) {
+        clearTimeout(copilotPollTimerRef.current);
+        copilotPollTimerRef.current = null;
       }
     };
   }, []);
@@ -270,7 +278,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         });
         return;
       }
-      if (platform === 'zai-tts' || platform === 'zai-image') {
+      if (platform === 'zai-tts' || platform === 'zai-image' || platform === 'copilot') {
         setStep('authorize');
         return;
       }
@@ -537,6 +545,10 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         setCountdown(600);
       }
 
+      if (platform === 'copilot') {
+        resetCopilotState();
+      }
+
       kiroAwsIdcJsonCancelRef.current = true;
       setIsKiroAwsIdcJsonImporting(false);
       kiroEnterpriseJsonCancelRef.current = true;
@@ -547,7 +559,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       if (platform === 'qwen') {
         setStep('method');
         setQwenLoginMethod('oauth');
-      } else if (platform === 'zai-tts' || platform === 'zai-image') {
+      } else if (platform === 'zai-tts' || platform === 'zai-image' || platform === 'copilot') {
         setStep('platform');
       } else if (platform === 'codex') {
         setStep('method');
@@ -1431,15 +1443,11 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     const clientId = kiroExternalIdpClientId.trim();
     const tokenEndpoint = kiroExternalIdpTokenEndpoint.trim();
     const region = kiroExternalIdpRegion.trim();
-    const ssoClientId = kiroExternalIdpSsoClientId.trim();
-    const ssoClientSecret = kiroExternalIdpSsoClientSecret.trim();
-    const ssoRefreshToken = kiroExternalIdpSsoRefreshToken.trim();
-    const ssoStartUrl = kiroExternalIdpSsoStartUrl.trim();
 
-    if (!refreshToken || !clientId || !tokenEndpoint || !ssoClientId || !ssoClientSecret || !ssoRefreshToken) {
+    if (!refreshToken || !clientId || !tokenEndpoint) {
       toasterRef.current?.show({
         title: '输入错误',
-        message: '请填写 refresh_token / client_id / token_endpoint 以及 SSO OIDC 必填字段',
+        message: '请填写 refresh_token、client_id 和 token_endpoint',
         variant: 'warning',
         position: 'top-right',
       });
@@ -1453,12 +1461,9 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         tokenEndpoint,
         issuerUrl: kiroExternalIdpIssuerUrl.trim() || undefined,
         scopes: kiroExternalIdpScopes.trim() || undefined,
+        profileArn: kiroExternalIdpProfileArn.trim() || undefined,
         region: region || 'us-east-1',
         isShared: 0,
-        ssoClientId,
-        ssoClientSecret,
-        ssoRefreshToken,
-        ssoStartUrl: ssoStartUrl || undefined,
       });
 
       if (created?.account_id) {
@@ -1567,14 +1572,10 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
           tokenEndpoint,
           issuerUrl: entry.issuer_url || entry.issuerUrl || undefined,
           scopes: entry.scopes || undefined,
-          clientSecret: entry.client_secret || entry.clientSecret || undefined,
           region: entry.region || kiroExternalIdpRegion || 'us-east-1',
           accountName: entry.account_name || entry.accountName || undefined,
           isShared: 0,
-          ssoClientId: entry.sso_client_id || entry.ssoClientId || undefined,
-          ssoClientSecret: entry.sso_client_secret || entry.ssoClientSecret || undefined,
-          ssoRefreshToken: entry.sso_refresh_token || entry.ssoRefreshToken || undefined,
-          ssoStartUrl: entry.sso_start_url || entry.ssoStartUrl || undefined,
+          profileArn: entry.profile_arn || entry.profileArn || undefined,
         });
 
         if (account?.account_id) {
@@ -2464,6 +2465,95 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
   };
 
+  // ==================== GitHub Copilot Device Flow ====================
+  const stopCopilotPolling = () => {
+    if (copilotPollTimerRef.current) {
+      clearTimeout(copilotPollTimerRef.current);
+      copilotPollTimerRef.current = null;
+    }
+    setCopilotIsPolling(false);
+  };
+
+  const resetCopilotState = () => {
+    stopCopilotPolling();
+    setCopilotDeviceCode('');
+    setCopilotVerificationUri('');
+    setCopilotIsStarting(false);
+  };
+
+  const handlePollCopilotDeviceFlow = async (userCode: string, intervalMs: number) => {
+    try {
+      const result = await pollCopilotDeviceFlow(userCode);
+      if (result.status === 'pending') {
+        // Respect slow_down interval from server
+        const nextInterval = result.interval ? result.interval * 1000 : intervalMs;
+        copilotPollTimerRef.current = setTimeout(() => {
+          handlePollCopilotDeviceFlow(userCode, nextInterval);
+        }, nextInterval);
+        return;
+      }
+
+      if (result.status === 'success') {
+        stopCopilotPolling();
+        (toasterRef.current?.show ?? showToast)({
+          title: '授权成功',
+          message: 'GitHub Copilot 账号已添加',
+          variant: 'success',
+          position: 'top-right',
+        });
+        window.dispatchEvent(new CustomEvent('accountAdded'));
+        onOpenChange(false);
+        resetState();
+        onSuccess?.();
+      } else {
+        stopCopilotPolling();
+        (toasterRef.current?.show ?? showToast)({
+          title: '授权失败',
+          message: result.message || (result.status === 'expired' ? '验证码已过期，请重新开始' : '授权过程中发生错误'),
+          variant: 'error',
+          position: 'top-right',
+        });
+        resetCopilotState();
+      }
+    } catch {
+      // Network error — retry after interval
+      copilotPollTimerRef.current = setTimeout(() => {
+        handlePollCopilotDeviceFlow(userCode, intervalMs);
+      }, intervalMs);
+    }
+  };
+
+  const handleStartCopilotDeviceFlow = async () => {
+    setCopilotIsStarting(true);
+    try {
+      const data = await startCopilotDeviceFlow();
+      setCopilotDeviceCode(data.user_code);
+      setCopilotVerificationUri(data.verification_uri);
+
+      window.open(data.verification_uri, '_blank');
+
+      const interval = Math.max((data.interval || 5) + 1, 6) * 1000;
+      const code = data.user_code;
+      setCopilotIsPolling(true);
+      setCopilotIsStarting(false);
+
+      if (copilotPollTimerRef.current) {
+        clearTimeout(copilotPollTimerRef.current);
+      }
+      copilotPollTimerRef.current = setTimeout(() => {
+        handlePollCopilotDeviceFlow(code, interval);
+      }, interval);
+    } catch (err) {
+      (toasterRef.current?.show ?? showToast)({
+        title: '启动失败',
+        message: err instanceof Error ? err.message : '无法启动 GitHub 授权流程',
+        variant: 'error',
+        position: 'top-right',
+      });
+      setCopilotIsStarting(false);
+    }
+  };
+
   const resetState = () => {
     // 清除所有定时器
     if (timerRef.current) {
@@ -2500,10 +2590,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     setKiroExternalIdpTokenEndpoint('');
     setKiroExternalIdpIssuerUrl('');
     setKiroExternalIdpScopes('');
-    setKiroExternalIdpSsoClientId('');
-    setKiroExternalIdpSsoClientSecret('');
-    setKiroExternalIdpSsoRefreshToken('');
-    setKiroExternalIdpSsoStartUrl('');
+    setKiroExternalIdpProfileArn('');
     setKiroExternalIdpRegion('us-east-1');
     setKiroExternalIdpJsonText('');
     setKiroExternalIdpJsonResults([]);
@@ -2538,6 +2625,14 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     setZaiImageAccountName('');
     setZaiImageToken('');
     setGeminiCliCredentialJson('');
+    setCopilotDeviceCode('');
+    setCopilotVerificationUri('');
+    setCopilotIsPolling(false);
+    setCopilotIsStarting(false);
+    if (copilotPollTimerRef.current) {
+      clearInterval(copilotPollTimerRef.current);
+      copilotPollTimerRef.current = null;
+    }
     setKiroAwsIdcRegion('us-east-1');
     setOauthUrl('');
     setOauthState('');
@@ -2824,6 +2919,34 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">
                       Token（Cookie session）
+                    </p>
+                  </div>
+                </label>
+
+                <label
+                  className={cn(
+                    "flex items-center gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
+                    platform === 'copilot' ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="platform"
+                    value="copilot"
+                    checked={platform === 'copilot'}
+                    onChange={(e) => setPlatform(e.target.value as 'copilot')}
+                    className="w-4 h-4"
+                  />
+                  <div className="w-10 h-10 rounded-lg bg-muted flex items-center justify-center">
+                    <IconBrandGithub className="size-6 text-foreground" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-semibold">GitHub Copilot</h3>
+                      <Badge variant="secondary">可用</Badge>
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      GitHub Token 导入
                     </p>
                   </div>
                 </label>
@@ -3497,6 +3620,57 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                       来自 image.z.ai 的 Cookie session
                     </p>
                   </div>
+                </>
+              ) : platform === 'copilot' ? (
+                <>
+                  <div className="space-y-3">
+                    <Label className="text-base font-semibold">GitHub Copilot 授权</Label>
+                    {!copilotDeviceCode ? (
+                      <p className="text-sm text-muted-foreground">
+                        点击按钮后将打开 GitHub 授权页面，在页面中输入验证码完成授权。
+                      </p>
+                    ) : null}
+                  </div>
+
+                  {copilotDeviceCode ? (
+                    <div className="flex flex-col items-center gap-4 p-6">
+                      <p className="text-sm text-muted-foreground">请在浏览器中输入以下验证码：</p>
+                      <div className="flex items-center gap-2">
+                        <code className="text-3xl font-bold tracking-widest bg-muted px-6 py-3 rounded-lg">
+                          {copilotDeviceCode}
+                        </code>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="cursor-pointer"
+                          onClick={() => {
+                            navigator.clipboard.writeText(copilotDeviceCode);
+                            (toasterRef.current?.show ?? showToast)({
+                              title: '已复制',
+                              message: '验证码已复制到剪贴板',
+                              variant: 'success',
+                              position: 'top-right',
+                            });
+                          }}
+                        >
+                          <IconCopy className="w-4 h-4 mr-1" />
+                          复制
+                        </Button>
+                      </div>
+                      <a
+                        href={copilotVerificationUri}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-blue-500 underline inline-flex items-center gap-1"
+                      >
+                        打开 GitHub 验证页面
+                        <IconExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                      {copilotIsPolling && (
+                        <p className="text-xs text-muted-foreground animate-pulse">等待授权中...</p>
+                      )}
+                    </div>
+                  ) : null}
                 </>
               ) : platform === 'codex' ? (
                 <>
@@ -4923,66 +5097,22 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     />
                   </div>
 
-                  {/* AWS SSO OIDC 凭据 */}
-                  <div className="space-y-1 pt-2">
-                    <Label className="text-base font-semibold">AWS SSO OIDC 凭据（来自 ~/.aws/sso/cache/）</Label>
+                  {/* Profile ARN（可选） */}
+                  <div className="space-y-3">
+                    <Label htmlFor="kiro-external-idp-profile-arn" className="text-base font-semibold">
+                      profileArn（可选，推荐提供）
+                    </Label>
+                    <Input
+                      id="kiro-external-idp-profile-arn"
+                      placeholder="例如：arn:aws:codewhisperer:us-east-1:XXXX:profile/YYYY"
+                      value={kiroExternalIdpProfileArn}
+                      onChange={(e) => setKiroExternalIdpProfileArn(e.target.value)}
+                      className="h-12 font-mono text-sm"
+                      autoComplete="off"
+                    />
                     <p className="text-xs text-muted-foreground">
-                      从本地 AWS SSO 缓存文件中获取以下字段。
+                      从 kiro-cli 数据库获取（~/Library/Application Support/kiro-cli/data.sqlite3 中 state 表的 api.codewhisperer.profile 键）。
                     </p>
-                  </div>
-
-                  <div className="space-y-3">
-                    <Label htmlFor="kiro-external-idp-sso-client-id" className="text-base font-semibold">
-                      SSO Client ID <span className="text-red-500">*</span>
-                    </Label>
-                    <Input
-                      id="kiro-external-idp-sso-client-id"
-                      placeholder="n_A4D7oot4..."
-                      value={kiroExternalIdpSsoClientId}
-                      onChange={(e) => setKiroExternalIdpSsoClientId(e.target.value)}
-                      className="h-12 font-mono text-sm"
-                      autoComplete="off"
-                    />
-                  </div>
-
-                  <div className="space-y-3">
-                    <Label htmlFor="kiro-external-idp-sso-client-secret" className="text-base font-semibold">
-                      SSO Client Secret <span className="text-red-500">*</span>
-                    </Label>
-                    <Textarea
-                      id="kiro-external-idp-sso-client-secret"
-                      placeholder="eyJraWQi..."
-                      value={kiroExternalIdpSsoClientSecret}
-                      onChange={(e) => setKiroExternalIdpSsoClientSecret(e.target.value)}
-                      className="font-mono text-sm [field-sizing:fixed] min-h-[80px] max-h-[160px] overflow-y-auto"
-                    />
-                  </div>
-
-                  <div className="space-y-3">
-                    <Label htmlFor="kiro-external-idp-sso-refresh-token" className="text-base font-semibold">
-                      SSO Refresh Token <span className="text-red-500">*</span>
-                    </Label>
-                    <Textarea
-                      id="kiro-external-idp-sso-refresh-token"
-                      placeholder="aorAAAAA..."
-                      value={kiroExternalIdpSsoRefreshToken}
-                      onChange={(e) => setKiroExternalIdpSsoRefreshToken(e.target.value)}
-                      className="font-mono text-sm [field-sizing:fixed] min-h-[80px] max-h-[160px] overflow-y-auto"
-                    />
-                  </div>
-
-                  <div className="space-y-3">
-                    <Label htmlFor="kiro-external-idp-sso-start-url" className="text-base font-semibold">
-                      SSO Start URL（可选）
-                    </Label>
-                    <Input
-                      id="kiro-external-idp-sso-start-url"
-                      placeholder="https://d-XXXX.awsapps.com/start"
-                      value={kiroExternalIdpSsoStartUrl}
-                      onChange={(e) => setKiroExternalIdpSsoStartUrl(e.target.value)}
-                      className="h-12 font-mono text-sm"
-                      autoComplete="off"
-                    />
                   </div>
 
                   <div className="space-y-3">
@@ -5111,6 +5241,24 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
               >
                 完成添加
               </StatefulButton>
+            ) : platform === 'copilot' ? (
+              copilotIsPolling ? (
+                <Button
+                  variant="outline"
+                  onClick={() => resetCopilotState()}
+                  className="flex-1 cursor-pointer"
+                >
+                  取消授权
+                </Button>
+              ) : (
+                <StatefulButton
+                  onClick={handleStartCopilotDeviceFlow}
+                  disabled={copilotIsStarting}
+                  className="flex-1 cursor-pointer"
+                >
+                  {copilotIsStarting ? '正在启动...' : '开始 GitHub 授权'}
+                </StatefulButton>
+              )
             ) : platform === 'codex' ? (
               codexLoginMethod === 'json' ? (
                 <StatefulButton
@@ -5266,10 +5414,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     disabled={
                       !kiroExternalIdpRefreshToken.trim() ||
                       !kiroExternalIdpClientId.trim() ||
-                      !kiroExternalIdpTokenEndpoint.trim() ||
-                      !kiroExternalIdpSsoClientId.trim() ||
-                      !kiroExternalIdpSsoClientSecret.trim() ||
-                      !kiroExternalIdpSsoRefreshToken.trim()
+                      !kiroExternalIdpTokenEndpoint.trim()
                     }
                     className="flex-1 cursor-pointer"
                   >
